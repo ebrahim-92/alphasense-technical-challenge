@@ -22,7 +22,7 @@ In regards to the fourth effect you see, I noticed that the `while True;` loop i
 
 Finally, in regards to the citations being broken can you please share how they are broken as well as an example. The script writes `result.markdown` to the disk completely unprocessed. GenSearch responses follow a consistent markdown structure that is outpligned in the reference documents [4][5]. Also, please see reference document [6] for an example of how to render citations for all three formats mentioned in [5].  
 
-I hope this helps with your concerns and the issues you have been experiencing. I would also be happy to jump on a call with you if you would like me to explain these findings even further. Please let me know if you have any other questions or need any other assistance. Have a wonderful day.
+I attached a version of the script to this correspondence that has fixes to your current integration please let me know if it helps. Also, I would be more than happy to jump on a call with you if you would like me to explain these findings even further. Please let me know if you have any other questions or need any other assistance. Have a wonderful day.
 
 ### References ###
 
