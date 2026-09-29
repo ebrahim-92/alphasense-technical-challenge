@@ -67,3 +67,7 @@ This error was not the most helpful as line 157 in the code was correct. I caugh
 - Structured storage (DynamoDB, S3 or a similar solution) instead of flat files
 
   Right now every run saves a new .md and .json file. That's fine for a few runs; however, if this is run daily for months you would have hundreds of loose files with no easy way to ask a question like "show me every time NVDA's outlook changed this year" as you would have to open files one by one. A real database lets you query the history instead of just piling it up.
+
+  # Note on case study 2
+
+  For case study 2, one of the deliverables is a fixed version of the broken client script. I have a fixed version in the case study 2 folder; however, it is a fixed version of the client's provided snippet. It isn't independently runnable, since the referenced client.py (AlphaSenseClient) wasn't included in the assignment. Fixes are applied directly to the logic as given, marked with # FIX: comments.

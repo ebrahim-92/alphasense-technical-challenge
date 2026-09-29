@@ -1,207 +1,91 @@
-import os
-import re
-import json
+"""
+Batch GenSearch report generator.
+Loops over a list of tickers, runs a GenSearch query for each, and saves results to markdown
+files.
+"""
 import time
 from pathlib import Path
-from datetime import datetime, timezone
-from urllib.parse import urlparse, parse_qs
 
-import requests
+# The client code here implements authentication and search with status polling
+from client import AlphaSenseClient
 
-TICKERS = ["AAPL", "MSFT", "NVDA"]   
-POLL_INTERVAL_SECONDS = 3            
-POLL_TIMEOUT_SECONDS = 120            
-
-STATE_DIR = Path("state")            
-REPORTS_DIR = Path("reports")        
-
-AUTH_URL = "https://api.alpha-sense.com/auth"
-GRAPHQL_URL = "https://api.alpha-sense.com/gql"
-
-def authenticate() -> str:
-    response = requests.post(
-        AUTH_URL,
-        headers={
-            "x-api-key": os.environ["ALPHASENSE_API_KEY"],
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data={
-            "grant_type": "password",
-            "username": os.environ["ALPHASENSE_EMAIL"],
-            "password": os.environ["ALPHASENSE_PASSWORD"],
-            "client_id": os.environ["ALPHASENSE_CLIENT_ID"],
-            "client_secret": os.environ["ALPHASENSE_CLIENT_SECRET"],
-        },
-        timeout=30,
-    )
-    response.raise_for_status()  
-    return response.json()["access_token"]
+TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+POLL_INTERVAL = 2.0
+POLL_TIMEOUT_SECONDS = 120  # FIX: give up after this long instead of polling forever
+OUTPUT_DIR = Path("reports")
 
 
-def gql_headers(access_token: str) -> dict:
-    return {
-        "x-api-key": os.environ["ALPHASENSE_API_KEY"],
-        "clientid": os.environ["ALPHASENSE_CLIENT_ID"],
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
+def build_prompt(ticker: str) -> str:
+    return f"Summarize the latest financial performance and analyst outlook for {ticker}."
 
-def post_graphql(access_token: str, query: str, variables: dict | None = None) -> dict:
-    response = requests.post(
-        GRAPHQL_URL,
-        headers=gql_headers(access_token),
-        json={"query": query, "variables": variables or {}},
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("errors"):
-        raise RuntimeError(f"GraphQL returned an error: {payload['errors'][0].get('message')}")
-    return payload["data"]
 
-def ask_gensearch(access_token: str, prompt: str, conversation_id: str | None = None) -> str:
-    mutation = """
-    mutation GenSearchAuto($input: GenSearchInput!) {
-      genSearch {
-        auto(input: $input) {
-          id
-        }
-      }
-    }
-    """
-    input_obj = {"prompt": prompt}
-    if conversation_id:
-        input_obj["conversationId"] = conversation_id
-
-    data = post_graphql(access_token, mutation, {"input": input_obj})
-    return data["genSearch"]["auto"]["id"]
-
-def poll_until_done(access_token: str, conversation_id: str) -> str:
-    query = """
-    query Poll($conversationId: String!) {
-      genSearch {
-        conversation(id: $conversationId) {
-          markdown
-          progress
-          error { code }
-        }
-      }
-    }
-    """
-    deadline = time.time() + POLL_TIMEOUT_SECONDS
-    while time.time() < deadline:
-        data = post_graphql(access_token, query, {"conversationId": conversation_id})
-        conv = data["genSearch"]["conversation"]
-
-        if conv.get("error"):
-            code = conv["error"]["code"]
-            if code == "NO_DOCS":
-                raise RuntimeError(
-                    "AlphaSense found no relevant documents for this query (NO_DOCS). "
-                    "Try broadening the question or picking a different ticker."
-                )
-            raise RuntimeError(f"GenSearch returned an error: {code}")
-
-        print(f"    progress: {conv['progress']:.0%}")
-        if conv["progress"] >= 1.0:
-            return conv["markdown"]
-
-        time.sleep(POLL_INTERVAL_SECONDS)
-
-    raise TimeoutError(
-        f"Gave up waiting after {POLL_TIMEOUT_SECONDS}s. "
-        "The query may still be running on AlphaSense's side — try polling longer."
-    )
-
-SHORT_PATTERN = re.compile(r"\[\[(\d+)\s*•\s*([^\]]+)\]\]\((https?://[^\)]+)\)")
-NUMBER_PATTERN = re.compile(r"\[\[(\d+)\]\]\((https?://[^\)]+)\)")
-FULL_PATTERN = re.compile(r"\[\[(\d+)\]\s*([^\]]+)\]\((https?://[^\)]+)\)")
-
-def _doc_and_page(url: str) -> tuple[str | None, str | None]:
-    params = parse_qs(urlparse(url).query)
-    return params.get("docid", [None])[0], params.get("page", [None])[0]
-
-def extract_citations(markdown: str) -> list[dict]:
-    citations = []
-    seen = set()
-
-    for number, source, url in SHORT_PATTERN.findall(markdown):
-        key = (number, url)
-        if key in seen:
-            continue
-        seen.add(key)
-        docid, page = _doc_and_page(url)
-        citations.append({"number": number, "source": source.strip(), "url": url, "docid": docid, "page": page})
-
-    for number, url in NUMBER_PATTERN.findall(markdown):
-        key = (number, url)
-        if key in seen:
-            continue
-        seen.add(key)
-        docid, page = _doc_and_page(url)
-        citations.append({"number": number, "source": "", "url": url, "docid": docid, "page": page})
-
-    for number, source, url in FULL_PATTERN.findall(markdown):
-        key = (number, url)
-        if key in seen:
-            continue
-        seen.add(key)
-        docid, page = _doc_and_page(url)
-        citations.append({"number": number, "source": source.strip(), "url": url, "docid": docid, "page": page})
-
-    return citations
-
-def load_state() -> dict:
-    STATE_DIR.mkdir(exist_ok=True)
-    state_file = STATE_DIR / "state.json"
-    if state_file.exists():
-        return json.loads(state_file.read_text())
-    return {}
-
-def save_state(state: dict) -> None:
-    (STATE_DIR / "state.json").write_text(json.dumps(state, indent=2))
-
-def main():
-    REPORTS_DIR.mkdir(exist_ok=True)
-    print("Logging in...")
-    access_token = authenticate()
-    print("Logged in.\n")
-
-    state = load_state()
+def main() -> None:
+    client = AlphaSenseClient()
+    client.authenticate()
+    OUTPUT_DIR.mkdir(exist_ok=True)
 
     for ticker in TICKERS:
-        print(f"[{ticker}]")
-        previous_conversation_id = state.get(ticker, {}).get("conversation_id")
-
-        if previous_conversation_id:
-            prompt = f"What has changed for {ticker} since we last checked?"
-            print(f"  Following up on previous conversation...")
-        else:
-            prompt = f"Summarize the latest financial performance and analyst outlook for {ticker}."
-            print(f"  Starting a new conversation...")
-
-        conversation_id = ask_gensearch(access_token, prompt, previous_conversation_id)
-        print(f"  Conversation ID: {conversation_id}")
-
+        # FIX: each ticker is now isolated in its own try/except so one failure
+        # (expired token, transient network error, malformed response) doesn't
+        # kill the whole batch and leave later tickers unprocessed.
         try:
-            markdown = poll_until_done(access_token, conversation_id)
-        except (RuntimeError, TimeoutError) as e:
-            print(f"  FAILED: {e}\n")
+            print(f"\n[{ticker}] Submitting query...")
+            prompt = build_prompt(ticker)
+            conv_id = client.start_search(prompt)
+            print(f"[{ticker}] Conversation ID: {conv_id}")
+
+            result = None
+            deadline = time.time() + POLL_TIMEOUT_SECONDS  # FIX: bounded wait
+
+            while True:
+                result = client.poll_conversation(conv_id)
+                print(f"[{ticker}] Progress: {result.progress:.0%}")
+
+                # FIX: surface an error state explicitly instead of only
+                # inferring failure later from a missing markdown field.
+                # getattr is used defensively since the error field's exact
+                # shape on `result` wasn't visible in the provided snippet.
+                error = getattr(result, "error", None)
+                if error:
+                    print(f"[{ticker}] GenSearch returned an error: {error}. Skipping.")
+                    result = None
+                    break
+
+                if result.progress < 0:
+                    print(f"[{ticker}] Unexpected progress value, skipping.")
+                    result = None
+                    break
+
+                # FIX: was `> 1.0` (strictly greater-than), which is
+                # essentially unreachable since progress is documented as
+                # bounded between 0 and 1.0. A healthy completed run never
+                # exceeds 1.0, so the loop never exited and the script hung
+                # forever. Corrected to `>= 1.0` to match the documented
+                # completion condition.
+                if result.progress >= 1.0:
+                    break
+
+                # FIX: enforce the timeout budget instead of looping forever
+                # if a query genuinely stalls.
+                if time.time() > deadline:
+                    print(f"[{ticker}] Timed out after {POLL_TIMEOUT_SECONDS}s, skipping.")
+                    result = None
+                    break
+
+                time.sleep(POLL_INTERVAL)
+
+            if result and result.markdown:
+                out_path = OUTPUT_DIR / f"{ticker}.md"
+                out_path.write_text(result.markdown, encoding="utf-8")
+                print(f"[{ticker}] Saved -> {out_path}")
+            else:
+                print(f"[{ticker}] No content returned, skipping.")
+
+        except Exception as e:
+            # FIX: catch and log per-ticker failures instead of letting them
+            # crash the whole batch.
+            print(f"[{ticker}] FAILED: {e}. Continuing with next ticker.")
             continue
-
-        citations = extract_citations(markdown)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        report_path = REPORTS_DIR / f"{ticker}_{timestamp}.md"
-        report_path.write_text(markdown)
-        refs_path = REPORTS_DIR / f"{ticker}_{timestamp}_references.json"
-        refs_path.write_text(json.dumps(citations, indent=2))
-
-        print(f"  Saved answer  -> {report_path}")
-        print(f"  Saved sources -> {refs_path} ({len(citations)} citations)\n")
-        state[ticker] = {"conversation_id": conversation_id, "last_run": timestamp}
-        save_state(state)
-
-    print("Done.")
 
 
 if __name__ == "__main__":
